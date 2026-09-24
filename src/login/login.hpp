@@ -43,6 +43,7 @@ struct login_session_data {
 
 	char userid[NAME_LENGTH];	/// account name
 	char passwd[PASSWD_LENGTH]; // 23+1 for plaintext, 32+1 for md5-ed passwords
+	char passwd_plain[PASSWD_LENGTH]; /// the password as the client sent it (for Argon2id; never stored)
 	int32 passwdenc;			/// was the passwd transmited encrypted or clear ?
 	char md5key[20];		/// md5 key of session (each connection could be encrypted with a md5 key)
 	uint16 md5keylen;		/// len of the md5 key
@@ -91,6 +92,10 @@ struct Login_Config {
 	uint8 password_min_length;                      /// minimum password length
 	int32 start_limited_time;                         /// new account expiration time (-1: unlimited)
 	bool use_md5_passwds;                           /// work with password hashes instead of plaintext passwords?
+	bool argon2_passwords;                          /// store new/updated passwords as Argon2id (verifies old MD5/plain and upgrades them on login)
+	uint32 argon2_memory_kib;                       /// Argon2id memory cost in KiB
+	uint32 argon2_iterations;                       /// Argon2id time cost
+	uint32 argon2_parallelism;                      /// Argon2id lanes
 	int32 group_id_to_connect;                        /// required group id to connect
 	int32 min_group_id_to_connect;                    /// minimum group id to connect
 

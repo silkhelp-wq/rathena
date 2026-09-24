@@ -2,6 +2,8 @@
 // For more information, see LICENCE in the main folder
 
 #pragma warning(disable:4800)
+#include <argon2.h>
+#include <random>
 #include "login.hpp"
 
 #include <cstdlib>
@@ -57,6 +59,30 @@ int32 login_fd; // login server file descriptor socket
 
 //early declaration
 bool login_check_password( struct login_session_data& sd, struct mmo_account& acc );
+
+/**
+ * Hash a plaintext password as an encoded Argon2id string
+ * ("$argon2id$v=19$m=..,t=..,p=..$salt$hash") with a random 16-byte salt.
+ * @return true on success; out holds the encoded hash.
+ */
+bool login_hash_password( const char* plain, char* out, size_t outlen ){
+	uint8 salt[16];
+	std::random_device rd;
+
+	for( size_t i = 0; i < sizeof( salt ); i++ ){
+		salt[i] = static_cast<uint8>( rd() & 0xFF );
+	}
+
+	int32 rc = argon2id_hash_encoded( login_config.argon2_iterations, login_config.argon2_memory_kib, login_config.argon2_parallelism,
+		plain, strlen( plain ), salt, sizeof( salt ), 32, out, outlen );
+
+	if( rc != ARGON2_OK ){
+		ShowError( "login_hash_password: argon2id failed: %s\n", argon2_error_message( rc ) );
+		return false;
+	}
+
+	return true;
+}
 
 ///Accessors
 AccountDB* login_get_accounts_db(void){
@@ -251,7 +277,9 @@ int32 login_mmo_auth_new(const char* userid, const char* pass, const char sex, c
 	memset(&acc, '\0', sizeof(acc));
 	acc.account_id = -1; // assigned by account db
 	safestrncpy(acc.userid, userid, sizeof(acc.userid));
-	safestrncpy(acc.pass, pass, sizeof(acc.pass));
+	// With Argon2id on, callers pass the plaintext and it is hashed here.
+	if( !login_config.argon2_passwords || !login_hash_password( pass, acc.pass, sizeof( acc.pass ) ) )
+		safestrncpy(acc.pass, pass, sizeof(acc.pass));
 	acc.sex = sex;
 	safestrncpy(acc.email, "a@a.com", sizeof(acc.email));
 	acc.expiration_time = ( login_config.start_limited_time != -1 ) ? time(nullptr) + login_config.start_limited_time : 0;
@@ -336,7 +364,7 @@ int32 login_mmo_auth(struct login_session_data* sd, bool isServer) {
 			len -= 2;
 			sd->userid[len] = '\0';
 
-			result = login_mmo_auth_new(sd->userid, sd->passwd, TOUPPER(sd->userid[len+1]), ip);
+			result = login_mmo_auth_new(sd->userid, login_config.argon2_passwords ? sd->passwd_plain : sd->passwd, TOUPPER(sd->userid[len+1]), ip);
 			if( result != -1 )
 				return result;// Failed to make account. [Skotlex].
 		}
@@ -443,7 +471,28 @@ int32 login_mmo_auth(struct login_session_data* sd, bool isServer) {
  */
 bool login_check_password( struct login_session_data& sd, struct mmo_account& acc ){
 	if( sd.passwdenc == 0 ){
-		return 0 == strcmp( sd.passwd, acc.pass );
+		// Argon2id-hashed account.
+		if( strncmp( acc.pass, "$argon2", 7 ) == 0 ){
+			return argon2id_verify( acc.pass, sd.passwd_plain, strlen( sd.passwd_plain ) ) == ARGON2_OK;
+		}
+
+		// Legacy MD5 (or plaintext) account.
+		if( 0 != strcmp( sd.passwd, acc.pass ) ){
+			return false;
+		}
+
+		// Correct - upgrade it to Argon2id now that the plaintext is known.
+		// login_mmo_auth saves the account right after a successful login.
+		if( login_config.argon2_passwords && sd.passwd_plain[0] != '\0' ){
+			char hashed[sizeof( acc.pass )];
+
+			if( login_hash_password( sd.passwd_plain, hashed, sizeof( hashed ) ) ){
+				safestrncpy( acc.pass, hashed, sizeof( acc.pass ) );
+				ShowInfo( "Password of account '%s' upgraded to Argon2id.\n", acc.userid );
+			}
+		}
+
+		return true;
 	}
 
 	// password mode set to 1 -> md5(md5key, refpass) enable with <passwordencrypt></passwordencrypt>
@@ -644,6 +693,14 @@ bool login_config_read(const char* cfgName, bool normal) {
 			login_config.start_limited_time = atoi(w2);
 		else if(!strcmpi(w1, "use_MD5_passwords"))
 			login_config.use_md5_passwds = (bool)config_switch(w2);
+		else if(!strcmpi(w1, "password_hashing"))
+			login_config.argon2_passwords = (strcmpi(w2, "argon2id") == 0);
+		else if(!strcmpi(w1, "argon2_memory_kib"))
+			login_config.argon2_memory_kib = cap_value(atoi(w2), 8, 4194304);
+		else if(!strcmpi(w1, "argon2_iterations"))
+			login_config.argon2_iterations = cap_value(atoi(w2), 1, 64);
+		else if(!strcmpi(w1, "argon2_parallelism"))
+			login_config.argon2_parallelism = cap_value(atoi(w2), 1, 16);
 		else if(!strcmpi(w1, "group_id_to_connect"))
 			login_config.group_id_to_connect = atoi(w2);
 		else if(!strcmpi(w1, "min_group_id_to_connect"))
@@ -764,6 +821,11 @@ void login_set_defaults() {
 	login_config.password_min_length = 4;
 #endif
 	login_config.use_md5_passwds = false;
+	login_config.argon2_passwords = false;
+	// OWASP's recommended Argon2id setting: 19 MiB, 2 iterations, 1 lane.
+	login_config.argon2_memory_kib = 19456;
+	login_config.argon2_iterations = 2;
+	login_config.argon2_parallelism = 1;
 	login_config.group_id_to_connect = -1;
 	login_config.min_group_id_to_connect = -1;
 

@@ -275,6 +275,7 @@ static bool logclif_parse_reqauth_raw( int32 fd, login_session_data& sd ){
 
 	ShowStatus( "Request for connection of %s (ip: %s)\n", sd.userid, ip );
 	safestrncpy( sd.passwd, p->password, PASSWD_LENGTH );
+	safestrncpy( sd.passwd_plain, sd.passwd, sizeof( sd.passwd_plain ) );
 
 	if( login_config.use_md5_passwds ){
 		MD5_String( sd.passwd, sd.passwd );
@@ -341,6 +342,7 @@ static bool logclif_parse_reqauth_sso( int32 fd, login_session_data& sd ){
 	ShowStatus( "Request for connection (SSO mode) of %s (ip: %s)\n", sd.userid, ip );
 	// Shinryo: For the time being, just use token as password.
 	safestrncpy( sd.passwd, p->token, std::min( sizeof( sd.passwd ), token_length + 1 ) );
+	safestrncpy( sd.passwd_plain, sd.passwd, sizeof( sd.passwd_plain ) );
 
 	if( login_config.use_md5_passwds ){
 		MD5_String( sd.passwd, sd.passwd );
@@ -408,6 +410,7 @@ static int32 logclif_parse_reqcharconnec(int32 fd, struct login_session_data *sd
 
 		safestrncpy(sd->userid, RFIFOCP(fd,2), NAME_LENGTH);
 		safestrncpy(sd->passwd, RFIFOCP(fd,26), NAME_LENGTH);
+		safestrncpy(sd->passwd_plain, sd->passwd, sizeof(sd->passwd_plain));
 		if( login_config.use_md5_passwds )
 			MD5_String(sd->passwd, sd->passwd);
 		sd->passwdenc = 0;
