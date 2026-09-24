@@ -567,7 +567,11 @@ int32 make_listen_bind(uint32 ip, uint16 port)
 		ShowError("make_listen_bind: bind failed (socket #%d, %s)!\n", fd, error_msg());
 		exit(EXIT_FAILURE);
 	}
-	result = sListen(fd,5);
+	// A backlog of 5 overflows as soon as players log in in bursts (server
+	// restart, WoE start): the kernel drops the SYNs and clients time out while
+	// the CPU is idle. SOMAXCONN lets the kernel queue them (it caps the value at
+	// net.core.somaxconn).
+	result = sListen(fd,SOMAXCONN);
 	if( result == SOCKET_ERROR ) {
 		ShowError("make_listen_bind: listen failed (socket #%d, %s)!\n", fd, error_msg());
 		exit(EXIT_FAILURE);
