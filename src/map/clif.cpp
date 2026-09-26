@@ -11179,6 +11179,9 @@ void clif_parse_LoadEndAck(int32 fd,map_session_data *sd)
 	}
 #endif
 
+	// Future RO: never more stat/skill points than the levels allow (login and every map).
+	pc_fro_check_points( sd );
+
 	sd->state.connect_new = 0;
 	sd->state.changemap = false;
 }

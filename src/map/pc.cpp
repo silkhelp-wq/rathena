@@ -9419,6 +9419,156 @@ int32 pc_resetstate(map_session_data* sd)
 	return 1;
 }
 
+// Future RO: a player below GM level never holds more stat, trait or skill points than their
+// levels allow, whatever put them there (the Build Master and other scripts set stats and
+// skills directly; a GM can move the world back to an episode with lower caps). Runs on every
+// map load (login included), after a job change and from the fro_checkpoints script command.
+// It also tops up to the exact amount, so a player never ends up with fewer either.
+//   - levels above the (episode's) caps are lowered; the real level is kept in FRO_TRUE_BLV /
+//     FRO_TRUE_JLV (and _EXP) and given back once the caps allow it again;
+//   - free points = what the levels allow minus what the current stats/skills cost; if the
+//     stats alone cost more than allowed (or a stat is over its cap) they are reset.
+static int32 pc_fro_tier_job_level( map_session_data* sd, uint64 mapid, int32 recorded ){
+	int32 job = pc_mapid2jobid( mapid, sd->status.sex );
+	int32 max = 0;
+	if( job >= JOB_NOVICE ){
+		std::shared_ptr<s_job_info> info = job_db.find( job );
+		if( info != nullptr )
+			max = info->max_job_level;
+	}
+	// rAthena counts an unrecorded (0) tier at its max. 1 means the class was skipped (the Build
+	// Master and GM commands jump straight to a class; no job-change NPC takes a job 1 character),
+	// so it counts as the max too. A recorded level is never above the max.
+	if( recorded <= 1 )
+		return max;
+	return max > 0 ? std::min( recorded, max ) : recorded;
+}
+
+static int32 pc_fro_allowed_skill_points( map_session_data* sd ){
+	if( ( sd->class_ & MAPID_SECONDMASK ) == MAPID_NOVICE )   // Novice, High Novice, Baby (not Super Novice)
+		return sd->status.job_level - 1;
+	int32 points = 0;
+	if( ( sd->class_ & MAPID_FIRSTMASK ) != MAPID_SUMMONER ){
+		std::shared_ptr<s_job_info> novice = job_db.find( JOB_NOVICE );
+		points += ( novice != nullptr ? novice->max_job_level : 10 ) - 1;
+	}
+	if( sd->class_ & JOBL_2 && ( sd->class_ & MAPID_SECONDMASK ) != MAPID_SUPER_NOVICE )
+		points += pc_fro_tier_job_level( sd, sd->class_ & MAPID_FIRSTMASK, sd->change_level_2nd ) - 1;
+	if( sd->class_ & JOBL_THIRD )
+		points += pc_fro_tier_job_level( sd, sd->class_ & MAPID_SECONDMASK, sd->change_level_3rd ) - 1;
+	if( sd->class_ & JOBL_FOURTH )
+		points += pc_fro_tier_job_level( sd, sd->class_ & MAPID_THIRDMASK, sd->change_level_4th ) - 1;
+	return points + sd->status.job_level - 1;
+}
+
+static bool pc_fro_fit_level( map_session_data* sd, bool base ){
+	uint32 max = base ? pc_maxbaselv( sd ) : pc_maxjoblv( sd );
+	uint32& level = base ? sd->status.base_level : sd->status.job_level;
+	t_exp& exp = base ? sd->status.base_exp : sd->status.job_exp;
+	const char* lv_var = base ? "FRO_TRUE_BLV" : "FRO_TRUE_JLV";
+	const char* exp_var = base ? "FRO_TRUE_BEXP" : "FRO_TRUE_JEXP";
+	int64 kept = pc_readglobalreg( sd, add_str( lv_var ) );
+
+	if( max > 0 && level > max ){
+		if( kept < level ){
+			pc_setglobalreg( sd, add_str( lv_var ), level );
+			pc_setglobalreg( sd, add_str( exp_var ), exp );
+		}
+		level = max;
+		exp = 0;
+	}else if( kept > level && level < max ){
+		// The caps went up again: give back the real level, as far as they allow.
+		level = std::min<uint32>( (uint32)kept, max );
+		if( level == kept ){
+			exp = pc_readglobalreg( sd, add_str( exp_var ) );
+			pc_setglobalreg( sd, add_str( lv_var ), 0 );
+			pc_setglobalreg( sd, add_str( exp_var ), 0 );
+		}else
+			exp = 0;
+	}else
+		return false;
+
+	clif_updatestatus( *sd, base ? SP_BASELEVEL : SP_JOBLEVEL );
+	clif_updatestatus( *sd, base ? SP_BASEEXP : SP_JOBEXP );
+	clif_updatestatus( *sd, base ? SP_NEXTBASEEXP : SP_NEXTJOBEXP );
+	return true;
+}
+
+void pc_fro_check_points( map_session_data* sd ){
+	nullpo_retv( sd );
+	if( pc_get_group_level( sd ) >= 60 )
+		return;   // GMs may hold anything (and do, to test)
+
+	bool levels = pc_fro_fit_level( sd, true );
+	levels |= pc_fro_fit_level( sd, false );
+	if( levels ){
+		pc_calc_skilltree( sd );
+		clif_skillinfoblock( *sd );
+	}
+
+	// Stats: free points = table points for the level (+ the rebirth bonus) - what the stats cost.
+	int64 allowed = statpoint_db.get_table_point( sd->status.base_level );
+	if( ( sd->class_ & JOBL_UPPER ) || pc_is_primary_fourth( sd->class_ ) )
+		allowed += battle_config.transcendent_status_points;
+	int64 spent = 0;
+	bool over_cap = false;
+	for( int32 sp = SP_STR; sp <= SP_LUK; sp++ ){
+		int32 value = pc_getstat( sd, sp );
+		if( value > pc_maxparameter( sd, (e_params)( PARAM_STR + sp - SP_STR ) ) )
+			over_cap = true;
+		if( value > 1 )
+			spent += pc_need_status_point( sd, sp, -( value - 1 ) );
+	}
+	if( over_cap || spent > allowed ){
+		ShowInfo( "Future RO: stats of %d:%d cost %" PRId64 " of %" PRId64 " points (or exceed the cap), reset.\n",
+			sd->status.account_id, sd->status.char_id, spent, allowed );
+		pc_resetstate( sd );   // gives exactly the table points for the level
+	}else if( sd->status.status_point != allowed - spent ){
+		sd->status.status_point = (uint32)( allowed - spent );
+		clif_updatestatus( *sd, SP_STATUSPOINT );
+	}
+
+	// Trait stats (4th classes): same rule with the trait table.
+	int64 t_allowed = statpoint_db.get_trait_table_point( sd->status.base_level );
+	if( pc_is_trait_job( sd->class_ ) )
+		t_allowed += battle_config.trait_points_job_change;
+	int64 t_spent = 0;
+	bool t_over = false;
+	for( int32 sp = SP_POW; sp <= SP_CRT; sp++ ){
+		int32 value = pc_getstat( sd, sp );
+		if( value > pc_maxparameter( sd, (e_params)( PARAM_POW + sp - SP_POW ) ) )
+			t_over = true;
+		if( value > 0 )
+			t_spent += pc_need_trait_point( sd, sp, -value );
+	}
+	if( t_over || t_spent > t_allowed ){
+		ShowInfo( "Future RO: trait stats of %d:%d over budget, reset.\n", sd->status.account_id, sd->status.char_id );
+		pc_resetstate( sd );
+	}else if( sd->status.trait_point != t_allowed - t_spent ){
+		sd->status.trait_point = (uint32)( t_allowed - t_spent );
+		clif_updatestatus( *sd, SP_TRAITPOINT );
+	}
+
+	// Skills: free points = what the class and its job levels allow - the learned levels
+	// (quest, wedding and granted skills are not counted, as in pc_calc_skillpoint).
+	int32 s_allowed = std::max( 0, pc_fro_allowed_skill_points( sd ) );
+	int32 s_spent = pc_calc_skillpoint( sd );
+	if( s_spent > s_allowed ){
+		ShowInfo( "Future RO: skills of %d:%d use %d of %d points, reset.\n",
+			sd->status.account_id, sd->status.char_id, s_spent, s_allowed );
+		pc_resetskill( sd, 1 );
+		s_spent = pc_calc_skillpoint( sd );
+	}
+	int32 s_free = std::max( 0, s_allowed - s_spent );
+	if( sd->status.skill_point != (uint32)s_free ){
+		sd->status.skill_point = s_free;
+		clif_updatestatus( *sd, SP_SKILLPOINT );
+	}
+
+	if( levels )
+		status_calc_pc( sd, SCO_NONE );
+}
+
 /*==========================================
  * /resetskill
  * if flag&1, perform block resync and status_calc call.
@@ -11072,6 +11222,8 @@ bool pc_jobchange(map_session_data *sd,int32 job, char upper)
 			}
 		}
 	}
+
+	pc_fro_check_points( sd );   // Future RO: never more points than the levels allow
 
 	chrif_save(sd, CSAVE_NORMAL);
 	//if you were previously famous, not anymore.
