@@ -1504,7 +1504,7 @@ int32 pc_follow(map_session_data*, int32); // [MouseJstr]
 int32 pc_stop_following(map_session_data*);
 
 uint32 pc_maxbaselv( const map_session_data* sd );
-void pc_fro_check_points( map_session_data* sd );   // Future RO (pc.cpp)
+void pc_fro_check_points( map_session_data* sd, bool full_tiers = false );   // Future RO (pc.cpp)
 uint32 pc_maxjoblv( const map_session_data* sd );
 bool pc_is_maxbaselv( const map_session_data* sd );
 bool pc_is_maxjoblv( const map_session_data* sd );

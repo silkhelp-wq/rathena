@@ -10,4 +10,4 @@
 
 //BUILDIN_DEF(example,""),
 
-BUILDIN_DEF(fro_checkpoints,""),
+BUILDIN_DEF(fro_checkpoints,"?"),

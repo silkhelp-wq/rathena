@@ -9494,8 +9494,26 @@ static bool pc_fro_fit_level( map_session_data* sd, bool base ){
 	return true;
 }
 
-void pc_fro_check_points( map_session_data* sd ){
+void pc_fro_check_points( map_session_data* sd, bool full_tiers ){
 	nullpo_retv( sd );
+	if( full_tiers ){
+		// The Build Master jumps straight to a class; its builds count every class on the way
+		// at its max job level, so record them that way (the job-change NPCs record the real
+		// level the character left each class at).
+		struct { uint64 flag, mask; uint16& level; const char* var; } tiers[] = {
+			{ JOBL_2, MAPID_FIRSTMASK, sd->change_level_2nd, JOBCHANGE2ND_VAR },
+			{ JOBL_THIRD, MAPID_SECONDMASK, sd->change_level_3rd, JOBCHANGE3RD_VAR },
+			{ JOBL_FOURTH, MAPID_THIRDMASK, sd->change_level_4th, JOBCHANGE4TH_VAR },
+		};
+		for( auto& t : tiers ){
+			if( !( sd->class_ & t.flag ) )
+				continue;
+			if( t.flag == JOBL_2 && ( sd->class_ & MAPID_SECONDMASK ) == MAPID_SUPER_NOVICE )
+				continue;
+			t.level = pc_fro_tier_job_level( sd, sd->class_ & t.mask, 0 );
+			pc_setglobalreg( sd, add_str( t.var ), t.level );
+		}
+	}
 	if( pc_get_group_level( sd ) >= 60 )
 		return;   // GMs may hold anything (and do, to test)
 
